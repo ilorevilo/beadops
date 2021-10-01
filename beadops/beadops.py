@@ -20,7 +20,10 @@ def clean_df(df):
 def filter_df(df, min_signal = 50):
     """ filters dataframe with detected beads by min signal"""
     
+    pstart = len(df.index)
     subdf = df[df["signal"] >= min_signal] #[sub.nlargest(nlargest, "signal") # extracting nlargest(default=5000) points with highest signal, (better results than mass)  
+    pend = len(subdf.index)
+    print(f"filtering particles from initially {pstart} to {pend}")
     
     return subdf
     
@@ -94,6 +97,16 @@ def parse_pressure_run(key):
     press = key.split("mbar")[0].split("um-")[1] # parse pressure from filename
     run = int(key.split("mbar")[1].split("-dz")[0]) # parse run from filename
     newkey = press + "mbar-" + str(run)
+    return newkey
+    
+def parse_pressure_run2(key):
+    # parser function to rename dictkeys, other labelling this time...
+    # labeling: sampleinfo-..um_{pressure}mbar-{run}-dz5_00_um---.
+    
+    press = key.split("mbar")[0].split("um_")[1] # parse pressure from filename
+    run = int(key.split("mbar-")[1].split("-dz")[0]) # parse run from filename
+    newkey = press + "mbar-" + str(run)
+    print(newkey)
     return newkey
 
 def calc_disp(df):
