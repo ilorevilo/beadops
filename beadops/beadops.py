@@ -3,32 +3,36 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.neighbors import KDTree
 from scipy.interpolate import griddata as gd
 from scipy.interpolate import Rbf
 from scipy.spatial import Delaunay
+from scipy import stats
 from vedo import *
 
 def plot_signal(df, bins=200):
+    """ plots histogram of signal of detected beads/ particles """
     df["signal"].hist(bins = bins)
 
 def clean_df(df):
+    """ drops all rows with nan in x/y/z column and resets df index """
     df.dropna(subset=['x', 'y','z'], inplace = True) #remove nan vals
     df.reset_index(drop = True, inplace = True)
     
     return df
 
 def filter_df(df, min_signal = 50):
-    """ filters dataframe with detected beads by min signal"""
+    """ filters dataframe with detected beads and keeps only beads with signal > min signal"""
     
-    pstart = len(df.index)
+    Nstart = len(df.index) # amount of particles initially in df
     subdf = df[df["signal"] >= min_signal] #[sub.nlargest(nlargest, "signal") # extracting nlargest(default=5000) points with highest signal, (better results than mass)  
-    pend = len(subdf.index)
-    print(f"filtering particles from initially {pstart} to {pend}")
+    Nend = len(subdf.index)
+    print(f"filtering particles from initially {Nstart} to {Nend}")
     
     return subdf
     
 def scale_df(df, scale_x, scale_y, scale_z):
-    """ sets scale for each dimension of position dataframe """
+    """ sets scale for each dimension of bead dataframe """
     df['x'] = df['x'] * scale_x # raises SettingWithCopyWarning: 
         # A value is trying to be set on a copy of a slice from a DataFrame.
     df['y'] = df['y'] * scale_y
@@ -82,17 +86,14 @@ def process_df_comp(raw_df, xy_scale, z_scale, min_signal, angle=None, z0=None):
     df = clean_df(df)
     df = filter_df(df, min_signal)
     df = scale_df(df, xy_scale, xy_scale, z_scale)
-    #df = rotate_xy(df, angle)
-    
-    #df = remove_outlier(df)
-    #df = remove_outlier(df.copy(), radius = 10, zval = 0.5)
-    
-    #df = subtract_z0(df, z0)
+
     return df
 
 def parse_pressure_run(key):
-    # parser function to rename dictkeys
-    # labeling: sampleinfo..um-{pressure}mbar{run}-dz....
+    """ 
+        parser function to rename dictkeys by extracting "pressure" and "run"
+        labeling: "sampleinfo..um-{pressure}mbar{run}-dz...."
+    """
     
     press = key.split("mbar")[0].split("um-")[1] # parse pressure from filename
     run = int(key.split("mbar")[1].split("-dz")[0]) # parse run from filename
@@ -100,8 +101,10 @@ def parse_pressure_run(key):
     return newkey
     
 def parse_pressure_run2(key):
-    # parser function to rename dictkeys, other labelling this time...
-    # labeling: sampleinfo-..um_{pressure}mbar-{run}-dz5_00_um---.
+    """
+        alternative parser func for datasets labeled:
+        "sampleinfo-..um_{pressure}mbar-{run}-dz5_00_um---."
+    """
     
     press = key.split("mbar")[0].split("um_")[1] # parse pressure from filename
     run = int(key.split("mbar-")[1].split("-dz")[0]) # parse run from filename
@@ -121,8 +124,14 @@ def calc_disp(df):
     #print("any nan in ux for frame 1?", np.isnan(df[df['frame']==1]['ux'].values).any()) # check if any nan vals present --> no, shift should be correct now    
     return df
 
-def filter_traj_sig(df):
-    """ filters out possibly wrongly linked trajectories by comparing signal variation along trajectory """ 
+def filter_traj_sig(df, zval = 0.0):
+    """ 
+        filters out possibly wrongly linked trajectories by comparing 
+        signal variation along trajectory (= over multiple "frames")
+        particle filtered out if its
+        standard deviation > mean(std_all) + zval * std(std_all)
+        with std_all = standard deviation of all particles
+    """ 
     Npre = df.set_index("particle").index.nunique() # particles before filtering
     
     stds = df.groupby('particle')['signal'].std()
@@ -133,17 +142,101 @@ def filter_traj_sig(df):
     # select all values where std of particle signal over trajectory lies below (one std over) mean of all particles signal stds
     # helps but not perfect
     # std_med might also help
-    mask = (stds <= std_mean + 0.0*std_std)
+    mask = (stds <= std_mean + zval*std_std)
     df = df.set_index("particle")[mask]
     Nafter = df.index.nunique()
     print(Nafter, "/", Npre, "trajectories filtered based on signal")
+    df.reset_index(inplace=True)
     
     return df
+
+
+def filter_traj_mean2(df, refframe = 1, radius = 100, coord = ['x','y','z'], zval = 1, metric = 'mean'):
+    """
+        further optimization of filter_traj_mean1, vectorizes query_radius:
+        takes 16 vs. 21 s
+        still to optimize: mean/ std calculation
+    """
     
-def filter_traj_mean(df, refframe = 1, distance = 100):
+    Nstart = len(df['particle'].unique())
+
+    refdf = df[df['frame']==refframe].copy() 
+    # so far copied, refdf.loc[:,"idxs"] = tree.query_radius raised "SettingWithCopyWarning: "
+    # probably due to setting array of indices as column value
+
+    #refdf.reset_index(drop = True, inplace = True)
+    refdf.reset_index(drop = True, inplace = True)
+    
+    xyz = refdf[coord].values
+    tree = KDTree(xyz, metric='euclidean') # build kdtree of distances considering ax-coordinate (xyz default)
+    refdf.loc[:,"idxs"] = tree.query_radius(xyz, r=radius) # returns list of indices related to coord-array
+
+    for comp in ['ux','uy','uz']:
+        if metric == 'mean':
+            means = refdf["idxs"].apply(lambda x: refdf.loc[x,comp].mean())
+            stds = refdf["idxs"].apply(lambda x: refdf.loc[x,comp].std())
+            refdf.loc[:,comp+'_outlier'] = np.abs(refdf[comp]-means) > zval * stds
+
+        else:
+            medians = refdf["idxs"].apply(lambda x: refdf.loc[x,comp].median())
+            mads = refdf["idxs"].apply(lambda x: stats.median_absolute_deviation(refdf.loc[x,comp]))
+            refdf.loc[:,comp+'_outlier'] = np.abs(refdf[comp]-medians) > zval * mads
+        
+
+    #refdf['outlier'] = refdf['ux_outlier'] #| refdf['uy_outlier'] | refdf['uz_outlier']
+    outlier = refdf[refdf['ux_outlier'] | refdf['uy_outlier'] | refdf['uz_outlier']]['particle'].values
+    
+    #outlier = refdf[refdf['ux_outlier'] == True]['particle'].values
+    
+    #print(type(outlier))
+    #print(outlier.shape)
+
+    #df_filt = df[(refdf['outlier']==False)]
+    df_filt = df.loc[~df["particle"].isin(outlier)] 
+    
+    Nend = len(df_filt["particle"].unique())
+    print(f"filtering particles from initially {Nstart} to {Nend}")
+    
+    return df_filt
+
+
+def filter_traj_mean1(df, refframe = 1, radius = 100, coord = ['x','y','z'], zval = 1):
+    """
+        kd-mean implementation, tested on same dataset: takes 21 s vs. 40 s --> faster
+    """
+ 
+    def check_local_outlier(row, ldf, radius):
+
+        coords = row[coord].values.reshape(1, -1) # get ax-coordinate for each point
+        idx = tree.query_radius(coords, r=radius)[0] # query points in reference configuration in defined distance to xy-coordinates        
+        
+        # provide colnames as arg and loop over list ['ux','uy','uz']?
+        ux_outlier = np.abs(row['ux'] - ldf.iloc[idx]['ux'].mean() ) > (zval * ldf.iloc[idx]['ux'].std()) # get z-value, package also available
+        uy_outlier = np.abs(row['uy'] - ldf.iloc[idx]['uy'].mean() ) > (zval * ldf.iloc[idx]['uy'].std()) # get z-value, package also available
+        uz_outlier = np.abs(row['uz'] - ldf.iloc[idx]['uz'].mean() ) > (zval * ldf.iloc[idx]['uz'].std()) # get z-value, package also available
+        classify_outlier = ux_outlier | uy_outlier | uz_outlier
+        return classify_outlier
+    
+    ldf = df[df['frame']==refframe]
+    Nstart = len(df.index.unique())
+    tree = KDTree(ldf[coord].values, metric='euclidean') # build kdtree of distances considering ax-coordinate (xyz default)
+
+    ldf.loc[:,'outlier'] = ldf.apply(lambda row: check_local_outlier(row, ldf, radius=radius), axis=1)
+
+    df_filt = df[(ldf['outlier']==False)]
+    
+    Nend = len(df_filt.index.unique())
+    print(f"filtering particles from initially {Nstart} to {Nend}")
+    
+    return df_filt
+
+def filter_traj_mean0(df, refframe = 1, distance = 100):
     """ filters out possibly wrongly linked trajectories by comparing displacement with mean displacement in neighbourhood 
         specify refframe = frame which is used for filtering
     """
+    
+    print("filtering trajectories by looking for local outlier different to mean local displacement")
+    Nstart = len(df.index.unique())
     
     def check_local_outlier(row, ldf, colname, d=100):
         dist = np.sqrt((row['x']-ldf['x'])**2 + (row['y']-ldf['y'])**2 + (row['z']-ldf['z'])**2) #calculates distance to each particle
@@ -159,11 +252,14 @@ def filter_traj_mean(df, refframe = 1, distance = 100):
     ldf = df[df['frame']==refframe]
     d = distance
 
-    ldf['ux_outlier'] = ldf.apply(lambda row: check_local_outlier(row, ldf, colname = 'ux', d=d), axis=1)
-    ldf['uy_outlier'] = ldf.apply(lambda row: check_local_outlier(row, ldf, colname = 'uy', d=d), axis=1)
-    ldf['uz_outlier'] = ldf.apply(lambda row: check_local_outlier(row, ldf, colname = 'uz', d=d), axis=1)
+    ldf.loc[:,'ux_outlier'] = ldf.apply(lambda row: check_local_outlier(row, ldf, colname = 'ux', d=d), axis=1)
+    ldf.loc[:,'uy_outlier'] = ldf.apply(lambda row: check_local_outlier(row, ldf, colname = 'uy', d=d), axis=1)
+    ldf.loc[:,'uz_outlier'] = ldf.apply(lambda row: check_local_outlier(row, ldf, colname = 'uz', d=d), axis=1)
     
     df = df[(ldf['ux_outlier']==False)&(ldf['uy_outlier']==False)&(ldf['uz_outlier']==False)]
+    
+    Nend = len(df.index.unique())
+    print(f"filtering particles from initially {Nstart} to {Nend}")
     return df
 
 def interpolate_linear(df, grid):
@@ -321,3 +417,159 @@ def plot_zslice(df, zpos, frame, width = 25, scale = 0.3, outputfolder=None, xli
         fig.savefig(outputfolder + "/" + fname)        
         plt.cla()
         plt.close(fig)
+        
+def plot_zslice_int(intfield, grid, compression=None, zpos = 400, outputfolder=None, vmin=0, vmax=20, scale=1):
+    """ 
+        plot slice of interpolated displacement field
+        divergence overlain with quiverplot of interpolated displacement components
+        igridspace: spacing in µm of interpolation grid
+        for instance: do interpolation here, todo: not efficient change in future to do only once!
+    """
+    
+    fig, ax = plt.subplots()
+    
+    igridspacing = grid[0,1,0,0]-grid[0,0,0,0] # assume equidistant spacing in xyz
+    #print(igridspacing)
+    plane = int(zpos/igridspacing) #20
+    #sh = int(igridspacing/2) # shift of quiver display
+    sh = 0 # omitted -> specify compression extent
+    quiv = ax.quiver(grid[0,:,:,plane]+sh, grid[1,:,:,plane]+sh, intfield[0,:,:,plane], intfield[1,:,:,plane], 
+        units='xy', angles = 'xy', pivot = 'mid', scale_units = 'xy', width = 5, scale = scale)#, headwidth = 2, headlength = 2)# imshow conventions of x/y-axis?
+    
+    if compression is not None:
+        im0 = ax.imshow(-compression[:,:,plane].T, vmin = vmin, vmax = vmax, origin = 'lower', cmap='inferno_r')
+        cbar = fig.colorbar(im0)    
+        cbar.ax.set_title('Compression [%]')
+
+
+        xmin, xmax = grid[0,0,0,0]-igridspacing/2, grid[0,-1,0,0] + igridspacing/2
+        ymin, ymax = grid[0,0,0,0]-igridspacing/2, grid[1,0,-1,0] + igridspacing/2
+        #zmin, zmax = grid[0,0,0,0]-igridspacing/2, grid[2,0,0,-1] + igridspacing/2
+        im0.set_extent([xmin, xmax, ymin, ymax])
+    
+    ax.set_aspect(1)
+    ax.minorticks_on()
+    ax.tick_params(axis='both', which='both', direction='in', top=True, right=True)
+    
+    ax.set_xlabel('x [µm]')
+    ax.set_ylabel('y [µm]')
+    
+    #ax.set_title("Interpolated displacement field")
+    
+    
+    if outputfolder is not None:
+        fname = "xy_z" + str(zpos) + "_f" + str(frame) + ".png"
+        fig.savefig(outputfolder + "/" + fname)        
+        plt.cla()
+        plt.close(fig)
+    
+    else:
+        return fig, ax
+        
+def plot_xslice_int(intfield, grid, compression, xpos = 400, outputfolder=None, vmin=0, vmax=20, scale=1):
+    """ 
+        plot slice of interpolated displacement field
+        divergence overlain with quiverplot of interpolated displacement components
+        igridspace: spacing in µm of interpolation grid
+        for instance: do interpolation here, todo: not efficient change in future to do only once!
+    """
+    
+    fig, ax = plt.subplots()
+    
+    igridspacing = grid[0,1,0,0]-grid[0,0,0,0] # assume equidistant spacing in xyz
+    print(igridspacing)
+    plane = int(xpos/igridspacing) #20
+    #sh = int(igridspacing/2) # shift of quiver display
+    sh = 0 # omitted -> specify compression extent
+    quiv = ax.quiver(grid[1,plane,:,:]+sh, grid[2,plane,:,:]+sh, intfield[1,plane,:,:], intfield[2,plane,:,:], 
+        units='xy', angles = 'xy', pivot = 'mid', scale_units = 'xy', width = 5, scale = scale)#, headwidth = 2, headlength = 2)# imshow conventions of x/y-axis?
+    
+    if compression is not None:
+        im0 = ax.imshow(-compression[plane,:,:].T, vmin = vmin, vmax = vmax, origin = 'lower', cmap='inferno_r')
+        cbar = fig.colorbar(im0)    
+        cbar.ax.set_title('Compression [%]')
+
+
+        #xmin, xmax = grid[0,0,0,0]-igridspacing/2, grid[0,-1,0,0] + igridspacing/2
+        ymin, ymax = grid[0,0,0,0]-igridspacing/2, grid[1,0,-1,0] + igridspacing/2
+        zmin, zmax = grid[0,0,0,0]-igridspacing/2, grid[2,0,0,-1] + igridspacing/2
+        im0.set_extent([ymin, ymax, zmin, zmax])
+    
+    ax.set_aspect(1)
+    ax.minorticks_on()
+    ax.tick_params(axis='both', which='both', direction='in', top=True, right=True)
+    
+    ax.set_xlabel('y [µm]')
+    ax.set_ylabel('z [µm]')
+    
+    #ax.set_title("Interpolated displacement field")
+    
+    
+    if outputfolder is not None:
+        fname = "xy_z" + str(zpos) + "_f" + str(frame) + ".png"
+        fig.savefig(outputfolder + "/" + fname)        
+        plt.cla()
+        plt.close(fig)
+    
+    else:
+        return fig, ax
+        
+def plot_yslice_int(intfield, grid, compression, planepos = 400, outputfolder=None, vmin=0, vmax=20, scale=1, planeax = 'y'):
+    """ 
+        plot slice of interpolated displacement field
+        divergence overlain with quiverplot of interpolated displacement components
+    """
+    
+    fig, ax = plt.subplots()
+    
+    igridspacing = grid[0,1,0,0]-grid[0,0,0,0] # assume equidistant spacing in xyz
+    print(igridspacing)
+    plane = int(planepos/igridspacing) #20
+    #sh = int(igridspacing/2) # shift of quiver display
+    sh = 0 # omitted -> specify compression extent
+    
+    if planeax == 'y':
+        xyuv = grid[0,:,plane,:]+sh, grid[2,:,plane,:]+sh, intfield[0,:,plane,:], intfield[2,:,plane,:]
+    
+    # expand for other planes
+        
+    quiv = ax.quiver(*xyuv, 
+        units='xy', angles = 'xy', pivot = 'mid', scale_units = 'xy', width = 5, scale = scale)#, headwidth = 2, headlength = 2)# imshow conventions of x/y-axis?
+    
+    if compression is not None:
+        
+        if planeax == 'y':
+            im0 = ax.imshow(-compression[:,plane,:].T, vmin = vmin, vmax = vmax, origin = 'lower', cmap='inferno_r')
+
+            xmin, xmax = grid[0,0,0,0]-igridspacing/2, grid[0,-1,0,0] + igridspacing/2
+            #ymin, ymax = grid[0,0,0,0]-igridspacing/2, grid[1,0,-1,0] + igridspacing/2
+            zmin, zmax = grid[0,0,0,0]-igridspacing/2, grid[2,0,0,-1] + igridspacing/2
+            
+            extent = [xmin, xmax, zmin, zmax]
+            
+        cbar = fig.colorbar(im0)    
+        cbar.ax.set_title('Compression [%]')
+
+
+
+        im0.set_extent(extent)
+    
+    ax.set_aspect(1)
+    ax.minorticks_on()
+    ax.tick_params(axis='both', which='both', direction='in', top=True, right=True)
+    
+    if planeax == 'y':
+        ax.set_xlabel('x [µm]')
+        ax.set_ylabel('z [µm]')
+    
+    #ax.set_title("Interpolated displacement field")
+    
+    
+    if outputfolder is not None:
+        fname = "xy_z" + str(zpos) + "_f" + str(frame) + ".png"
+        fig.savefig(outputfolder + "/" + fname)        
+        plt.cla()
+        plt.close(fig)
+    
+    else:
+        return fig, ax
