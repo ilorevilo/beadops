@@ -334,6 +334,34 @@ def calc_compression(dfield, igridspacing):
     comp = (divergence([ux_interp, uy_interp, uz_interp])/igridspacing)*100
     return comp
 
+def calc_compression2(dfield, igridspacing):
+    
+    Jacobi = np.empty((*dfield.shape[1:],3,3))
+    Jacobi.fill(np.nan) # create empty array of correct dimensions
+    
+    # assemble Jacobi from partial derivatives
+    for i in [0,1,2]:
+        for j in [0,1,2]:
+            Jacobi[:,:,:,i,j] = np.gradient(dfield[i], axis = j)/igridspacing
+    
+    # test, should yield same compression as divergence
+    #Jacobi[:,:,:,0,1:2] = 0
+    #Jacobi[:,:,:,1,0] = 0
+    #Jacobi[:,:,:,1,2] = 0
+    #Jacobi[:,:,:,2,0:1] = 0
+    
+    for i in [0,1,2]:
+        Jacobi[:,:,:,i,i] = 1 + Jacobi[:,:,:,i,i]
+    
+    Jdet = np.linalg.det(Jacobi)
+    
+    #Jdet = Jacobi[:,:,:,0,0] + Jacobi[:,:,:,1,1] + Jacobi[:,:,:,2,2] # same result as divergence (considering Jacobi without added +1 on diagonals)
+    #Jdet = Jacobi[:,:,:,0,0] * Jacobi[:,:,:,1,1] * Jacobi[:,:,:,2,2]
+    
+    #comp = (Jdet/igridspacing)*100
+    comp = (Jdet-1)*100
+    return comp
+
 def mask_grid(cgrid, pts):
     """ 
         returns masked input of coordinate-grid (created by mgrid, shape 3 x Nx x Ny x Nz) which corresponds to convex hull of inputpoints
