@@ -6,7 +6,7 @@ setuptools.setup(
         name="beadops",
         version="0.1",
         author="Oliver Schneider",
-        author_email="oliver.schneider@igb.fraunhofer.de",
+        author_email="ghilorevilo@posteo.de",
         description="beadoperations - convenience functions for tracking and analyzing bead trajectories from zstacks",
         long_description="",
         url="",
