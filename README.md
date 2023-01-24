@@ -16,7 +16,7 @@ In my usecase I wanted to determine the space-resolved compression of a hydrogel
 
 ### Output
 
-- Extracted particle tracks can be visualized in 3D (interactive version [figs/linked_3D.html](https://htmlpreview.github.io/?https://github.com/ilorevilo/beadops/figs/linked_3D.html)):
+- Extracted particle tracks can be visualized in 3D (interactive version [figs/linked_3D.html](https://htmlpreview.github.io/?https://raw.githubusercontent.com/ilorevilo/beadops/master/figs/linked_3D.html)):
 	![](figs/linked_3D.jpg)
 - Cutplanes of linked particles:
 	![](figs/yz_x400_f1.png)
