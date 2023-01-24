@@ -3,20 +3,72 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
+import trackpy as tp
+import tifffile
+import pathlib
 from sklearn.neighbors import KDTree
 from scipy.interpolate import griddata as gd
 from scipy.interpolate import Rbf
 from scipy.spatial import Delaunay
 from scipy import stats
-from vedo import *
+
+try:
+    from vedo import *
+except ImportError:
+    vedo_installed = False
+else:
+    vedo_installed = True
+
+def find_features(datafolder, outputfolder, locateparams, overwrite = False):
+    """
+        utilizes Trackpy to find features (beads) in z-stack
+        z-stack stored as list of .tif-files in datafolder, result is saved as .pickle in outputfolder
+        input: datafolder, outputfolder, locateparams, overwrite results
+        locateparams: tuple of diameters passed to trackpy.locate (= tuple of expected diameter of tracked particles dz/dx/dy)
+        if a list of tuples is provided, the analysis will be conducted for each tuple
+            e.g. locateparams = [(11,7,7)]
+            or locateparams = [(11,9,9),(11,7,7),(11,5,5),(7,9,9),(7,7,7),(7,5,5), (5,9,9), (5,7,7), (5,5,5)]
+    """
+    
+    fname = datafolder.name
+    print("loading z-stack in folder", fname)
+    zstack = tifffile.imread((str(datafolder) + '/*.tif'),pattern=None)
+    
+    # pad edge in z for better detection
+    npad = ((3, 3), (0, 0), (0, 0)) # npad is a tuple of (n_before, n_after) for each dimension
+    zstack = np.pad(zstack, npad, 'mean')
+
+    for par in locateparams:
+        parstring = str(par[0]) + "_" + str(par[1]) + "_" + str(par[2])
+        print("analyze with parameters", parstring)
+        
+        picklepath = outputfolder/(fname+"-"+parstring+'.pickle')
+        if picklepath.exists() and (overwrite == False): # don't track beads if already done, except specified
+            print("skipping, already analyzed, rerun with overwrite kwarg if desired")
+            break
+        features = tp.locate(zstack, diameter=par)
+        outputfolder.mkdir(parents=True, exist_ok=True)
+        features.to_pickle(picklepath)
+
+def find_features_subfolders(datafolder, outputfolder, locateparams, overwrite = False):
+    """
+        calls find_features on all subfolders inside datafolder
+    """
+        
+    subfolders = list(datafolder.glob('*/'))
+    print("finding features in subfolders:", [sf.name for sf in subfolders])
+    
+    for folder in subfolders:
+        find_features(folder, outputfolder, locateparams, overwrite = overwrite)
 
 def plot_signal(df, bins=200):
     """ plots histogram of signal of detected beads/ particles """
-    df["signal"].hist(bins = bins)
+    return df["signal"].hist(bins = bins)
 
 def clean_df(df):
     """ drops all rows with nan in x/y/z column and resets df index """
     df.dropna(subset=['x', 'y','z'], inplace = True) #remove nan vals
+    df = df[['x', 'y','z','signal']]
     df.reset_index(drop = True, inplace = True)
     
     return df
@@ -25,7 +77,8 @@ def filter_df(df, min_signal = 50):
     """ filters dataframe with detected beads and keeps only beads with signal > min signal"""
     
     Nstart = len(df.index) # amount of particles initially in df
-    subdf = df[df["signal"] >= min_signal] #[sub.nlargest(nlargest, "signal") # extracting nlargest(default=5000) points with highest signal, (better results than mass)  
+    subdf = df[df["signal"] >= min_signal]
+    # alternative: sub.nlargest(nlargest, "signal") # extracting nlargest(default=5000) points with highest signal
     Nend = len(subdf.index)
     print(f"filtering particles from initially {Nstart} to {Nend}")
     
@@ -33,8 +86,7 @@ def filter_df(df, min_signal = 50):
     
 def scale_df(df, scale_x, scale_y, scale_z):
     """ sets scale for each dimension of bead dataframe """
-    df['x'] = df['x'] * scale_x # raises SettingWithCopyWarning: 
-        # A value is trying to be set on a copy of a slice from a DataFrame.
+    df['x'] = df['x'] * scale_x
     df['y'] = df['y'] * scale_y
     df['z'] = df['z'] * scale_z
     
@@ -44,10 +96,15 @@ def plot_pts_vedo(dfs, zcols = None, colors=None, alpha = 1, embed = True, r=10,
     """
         plots extracted points in 3d using vedo (vtk-based)
         if embed = True: embeds into notebook, if embed = False opens in new window
+        generally plots z-value as function of x/y, other columns of df can be als plotted, if zcols is a list of names of zval-column to plot
         provide multiple dfs in a list to plot various points
-        provide another list of colors to color dfs individually
-        cols: list of names of zval to plot, generally plots z-value as function of x/y, other columns can be als plotted
+        provide list of colors to color points in each df individually, otherwise they are coloured in red
+        other parameters correspond to point parameters
     """
+    
+    if vedo_installed == False:
+        print("Vedo not installed. Please install vedo for visualizing pointclouds in 3D.")
+        return
     
     
     pts = []
@@ -68,26 +125,38 @@ def plot_pts_vedo(dfs, zcols = None, colors=None, alpha = 1, embed = True, r=10,
         pts.append(Points(xyz, c = col, alpha = alpha, r=r))
 
     if embed == True:
-        embedWindow('k3d') # try panel?
+        settings.default_backend = 'k3d'
         return show(pts, camera=cam, axes=axes) 
     else:
-        embedWindow(False)
+        settings.default_backend = 'vtk'
         vp = Plotter(size=size, axes=axes)
         vp += pts
-        vp.show(antialias=3, camera=cam) # not sure if antialias kwarg matters
+        vp.show(camera=cam) # not sure if antialias kwarg matters; antialias=3
 
-def process_df_comp(raw_df, xy_scale, z_scale, min_signal, angle=None, z0=None):
+def process_df(raw_df, xy_scale, z_scale, min_signal):
     """
-        convencience function which bundles all processing steps
-        required input: filtering parameters extracted from sample
+        convencience function which bundles processing steps cleaning, filtering and scaling
+        input: scale and filtering parameter (min_signal) extracted from one sample
     """
-    print("processing df")
+    # print("processing df")
     df = raw_df.copy()
     df = clean_df(df)
     df = filter_df(df, min_signal)
     df = scale_df(df, xy_scale, xy_scale, z_scale)
 
     return df
+    
+def filter_features_subfolders(datafolder, outputfolder, xy_scale, z_scale, min_signal):
+    """ filter and process all pickled raw features from datafolder, save to outputfolder """
+    raw_features = list(datafolder.glob('*.pickle')) 
+    outputfolder.mkdir(parents=True, exist_ok=True)
+    
+    
+    for raw_feat in raw_features: 
+        print(f"filter features from {raw_feat.name}")
+        df = pd.read_pickle(raw_feat)
+        df = process_df(df, xy_scale, z_scale, min_signal)
+        df.to_pickle(outputfolder/(raw_feat.stem+'.pickle'))
 
 def parse_pressure_run(key):
     """ 
@@ -124,6 +193,37 @@ def calc_disp(df):
     #print("any nan in ux for frame 1?", np.isnan(df[df['frame']==1]['ux'].values).any()) # check if any nan vals present --> no, shift should be correct now    
     return df
 
+def link_particles(dfdict, linkorder, search_range = 15):
+    """
+        links particles between z-stacks with trackpy.link_df
+        z-stacks stored in dfdict={experimentlabel:particledf}
+        linkorder: list with experimentlabels to specify linking order
+        search_range: max. travel (specified in µm) between stacks, arg passed to trackpy
+    """
+
+    # combine dict of dataframes to single dataframe
+    dflist = [dfdict[key] for key in linkorder]
+    for nr, df in enumerate(dflist):
+        df["frame"]=nr
+    df_combined = pd.concat(dflist)
+    
+    # link particles
+    linked_df = tp.link_df(df_combined, search_range = search_range)
+    print("linked particles:", linked_df['particle'].nunique()) # count unique particle numbers
+    
+    # filter out particles which are not present in every stack
+    Nframes = len(linkorder)
+    min_occurrences = Nframes
+    linked_df = tp.filter_stubs(linked_df, min_occurrences) # keep only tracks which are present in all frames
+    print("present in all frames:", linked_df['particle'].nunique())
+    
+    # sort and calculate displacements relative to initial position
+    linked_df = linked_df.set_index('particle').sort_index() 
+    # sorting is exremeley important when .values are extracted later!
+    linked_df = calc_disp(linked_df) # add ux, uy, uz columns by calculation displacement in reference to frame 0
+    
+    return linked_df
+
 def filter_traj_sig(df, zval = 0.0):
     """ 
         filters out possibly wrongly linked trajectories by comparing 
@@ -141,7 +241,7 @@ def filter_traj_sig(df, zval = 0.0):
 
     # select all values where std of particle signal over trajectory lies below (one std over) mean of all particles signal stds
     # helps but not perfect
-    # std_med might also help
+    # std_med also conceivable
     mask = (stds <= std_mean + zval*std_std)
     df = df.set_index("particle")[mask]
     Nafter = df.index.nunique()
@@ -149,7 +249,6 @@ def filter_traj_sig(df, zval = 0.0):
     df.reset_index(inplace=True)
     
     return df
-
 
 def filter_traj_mean2(df, refframe = 1, radius = 100, coord = ['x','y','z'], zval = 1, metric = 'mean'):
     """
@@ -266,7 +365,7 @@ def interpolate_linear(df, grid):
     """ interpolates for each frame on specified grid, 
         input df columns: frame, x, y, z, ux, uy, uz
         each scalar ux, uy, uz is interpolated separately
-        returns dict frame:interpolated_arrays [ux/uy/uz=0/1/2, x, y, z]
+        returns dict {frame:interpolated_arrays [component, x, y, z]}; component: ux/uy/uz=0/1/2
     """
     interp_disp = {}
     
@@ -282,12 +381,13 @@ def interpolate_linear(df, grid):
         ux_interp = gd(pts, ux, (grid[0], grid[1], grid[2]), method = method)
         uy_interp = gd(pts, uy, (grid[0], grid[1], grid[2]), method = method)
         uz_interp = gd(pts, uz, (grid[0], grid[1], grid[2]), method = method)
-        interp_disp[frame] = np.array([ux_interp, uy_interp, uz_interp]) # best way to stack array? or along other axis?
+        interp_disp[frame] = np.array([ux_interp, uy_interp, uz_interp]) # best way to stack array chosen? or rather along other axis?
         # np.array(list of arrays) is same as np.stack(list of arrays)
     
     return interp_disp
 
 def interpolate_Rbf(df, grid):
+    """ work in progress, try interpolation via radial basis functions (Rbf) """
     interp_disp = {}
     
     nframes = df['frame'].unique()
@@ -328,39 +428,47 @@ def divergence(f):
     num_dims = len(f)
     return np.ufunc.reduce(np.add, [np.gradient(f[i], axis=i) for i in range(num_dims)])
     
-def calc_compression(dfield, igridspacing):
+def calc_compression(dfield, igridspacing, div_approx = False):
+    """ 
+        calculates compression from displacementfield
+        utilizes Jacobi determinant or divergence as approximation (if div_appox=True)
+        Args:
+          dfield: displacement field, numpy array [component,x,y,z], component ux/uy/uz = 1/2/3
+          igridspacing: spacing of grid used for interpolation
+          div_approx: bool to trigger approximation of compression (divergence instead of Jacobi determinant used)
+        Returns: 
+          compression: numpy array with space-resolved compression [x/y/z]
+    """
+        
     # correct units so far only if same gridspacing for x, y and z used. Otherwise divergence has to be adjusted!
-    ux_interp, uy_interp, uz_interp = dfield[0], dfield[1], dfield[2]
-    comp = (divergence([ux_interp, uy_interp, uz_interp])/igridspacing)*100
+    
+    # determine compression from divergence (approximation, valid for small compressions)
+    if div_approx == True:
+        ux_interp, uy_interp, uz_interp = dfield[0], dfield[1], dfield[2]
+        comp = (divergence([ux_interp, uy_interp, uz_interp])/igridspacing)*100
+    
+    # utilize Jacobi determinant else
+    else:
+        Jacobi = np.empty((*dfield.shape[1:],3,3))
+        Jacobi.fill(np.nan) # create empty array of correct dimensions
+    
+        # assemble Jacobi from partial derivatives
+        for i in [0,1,2]:
+            for j in [0,1,2]:
+                Jacobi[:,:,:,i,j] = np.gradient(dfield[i], axis = j)/igridspacing
+                
+        for i in [0,1,2]:
+            Jacobi[:,:,:,i,i] = 1 + Jacobi[:,:,:,i,i]
+    
+        Jdet = np.linalg.det(Jacobi)    
+        comp = (Jdet-1)*100    
+                
     return comp
 
-def calc_compression2(dfield, igridspacing):
-    
-    Jacobi = np.empty((*dfield.shape[1:],3,3))
-    Jacobi.fill(np.nan) # create empty array of correct dimensions
-    
-    # assemble Jacobi from partial derivatives
-    for i in [0,1,2]:
-        for j in [0,1,2]:
-            Jacobi[:,:,:,i,j] = np.gradient(dfield[i], axis = j)/igridspacing
-    
-    # test, should yield same compression as divergence
-    #Jacobi[:,:,:,0,1:2] = 0
-    #Jacobi[:,:,:,1,0] = 0
-    #Jacobi[:,:,:,1,2] = 0
-    #Jacobi[:,:,:,2,0:1] = 0
-    
-    for i in [0,1,2]:
-        Jacobi[:,:,:,i,i] = 1 + Jacobi[:,:,:,i,i]
-    
-    Jdet = np.linalg.det(Jacobi)
-    
-    #Jdet = Jacobi[:,:,:,0,0] + Jacobi[:,:,:,1,1] + Jacobi[:,:,:,2,2] # same result as divergence (considering Jacobi without added +1 on diagonals)
-    #Jdet = Jacobi[:,:,:,0,0] * Jacobi[:,:,:,1,1] * Jacobi[:,:,:,2,2]
-    
-    #comp = (Jdet/igridspacing)*100
-    comp = (Jdet-1)*100
-    return comp
+def calc_zstrain(dfield, igridspacing):
+    """ testfunction to calculate gradient in z-direction """
+    zstrain = (np.gradient(dfield[2], axis = 2)/igridspacing)*100
+    return zstrain
 
 def mask_grid(cgrid, pts):
     """ 
@@ -398,8 +506,15 @@ def plot_xslice(df, xpos, frame, width = 25, scale = 0.3, outputfolder=None, xli
                  " µm, frame = " + str(frame) + ", scale = " + str(scale))
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
+    ax.set_aspect(1)
+    ax.minorticks_on()    
+    ax.tick_params(axis='both', which='both', direction='in', top=True, right=True)
+    
+    ax.set_xlabel('y [µm]')
+    ax.set_ylabel('z [µm]')    
     
     if outputfolder is not None:
+        pathlib.Path(outputfolder).mkdir(parents=True, exist_ok=True)
         fname = "yz_x" + str(xpos) + "_f" + str(frame) + ".png"
         fig.savefig(outputfolder + "/" + fname)
         plt.cla()
@@ -418,8 +533,15 @@ def plot_yslice(df, ypos, frame, width = 25, scale = 0.3, outputfolder=None, xli
                  " µm, frame = " + str(frame) + ", scale = " + str(scale))
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
+    ax.set_aspect(1)
+    ax.minorticks_on()    
+    ax.tick_params(axis='both', which='both', direction='in', top=True, right=True)
+    
+    ax.set_xlabel('y [µm]')
+    ax.set_ylabel('z [µm]')
     
     if outputfolder is not None:
+        pathlib.Path(outputfolder).mkdir(parents=True, exist_ok=True)
         fname = "xz_y" + str(ypos) + "_f" + str(frame) + ".png"
         fig.savefig(outputfolder + "/" + fname)
         plt.cla()
@@ -439,28 +561,35 @@ def plot_zslice(df, zpos, frame, width = 25, scale = 0.3, outputfolder=None, xli
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_aspect(1)
+    ax.minorticks_on()    
+    ax.tick_params(axis='both', which='both', direction='in', top=True, right=True)
+    
+    ax.set_xlabel('y [µm]')
+    ax.set_ylabel('z [µm]')    
     
     if outputfolder is not None:
+        pathlib.Path(outputfolder).mkdir(parents=True, exist_ok=True)
         fname = "xy_z" + str(zpos) + "_f" + str(frame) + ".png"
         fig.savefig(outputfolder + "/" + fname)        
         plt.cla()
         plt.close(fig)
         
-def plot_zslice_int(intfield, grid, compression=None, zpos = 400, outputfolder=None, vmin=0, vmax=20, scale=1):
+def plot_zslice_int(intfield, frame, grid, compression=None, zpos = 400, outputfolder=None, vmin=0, vmax=20, scale=1):
     """ 
-        plot slice of interpolated displacement field
-        divergence overlain with quiverplot of interpolated displacement components
+        plot quiverplot of slice of interpolated displacement field
+        if compression array provided: overlain with color-coded compression
         igridspace: spacing in µm of interpolation grid
-        for instance: do interpolation here, todo: not efficient change in future to do only once!
     """
+    
+    #to do: merge to single function for plotting x,y,z
     
     fig, ax = plt.subplots()
     
-    igridspacing = grid[0,1,0,0]-grid[0,0,0,0] # assume equidistant spacing in xyz
-    #print(igridspacing)
+    # extract used grid in interpolation, take care, assumes equidistant spacing in xyz
+    igridspacing = grid[0,1,0,0]-grid[0,0,0,0]
     plane = int(zpos/igridspacing) #20
     #sh = int(igridspacing/2) # shift of quiver display
-    sh = 0 # omitted -> specify compression extent
+    sh = 0 # omitted -> specified by compression extent (set_extent)
     quiv = ax.quiver(grid[0,:,:,plane]+sh, grid[1,:,:,plane]+sh, intfield[0,:,:,plane], intfield[1,:,:,plane], 
         units='xy', angles = 'xy', pivot = 'mid', scale_units = 'xy', width = 5, scale = scale)#, headwidth = 2, headlength = 2)# imshow conventions of x/y-axis?
     
@@ -468,7 +597,6 @@ def plot_zslice_int(intfield, grid, compression=None, zpos = 400, outputfolder=N
         im0 = ax.imshow(-compression[:,:,plane].T, vmin = vmin, vmax = vmax, origin = 'lower', cmap='inferno_r')
         cbar = fig.colorbar(im0)    
         cbar.ax.set_title('Compression [%]')
-
 
         xmin, xmax = grid[0,0,0,0]-igridspacing/2, grid[0,-1,0,0] + igridspacing/2
         ymin, ymax = grid[0,0,0,0]-igridspacing/2, grid[1,0,-1,0] + igridspacing/2
@@ -486,23 +614,24 @@ def plot_zslice_int(intfield, grid, compression=None, zpos = 400, outputfolder=N
     
     
     if outputfolder is not None:
-        fname = "xy_z" + str(zpos) + "_f" + str(frame) + ".png"
+        pathlib.Path(outputfolder).mkdir(parents=True, exist_ok=True)
+        fname = "xy_z" + str(zpos) + "_f" + str(frame) + "-int.png"
         fig.savefig(outputfolder + "/" + fname)        
         plt.cla()
         plt.close(fig)
     
     else:
         return fig, ax
-        
-def plot_xslice_int(intfield, grid, compression, xpos = 400, outputfolder=None, vmin=0, vmax=20, scale=1):
+
+
+def plot_xslice_int(intfield, frame, grid, compression = None, xpos = 400, outputfolder = None, vmin=0, vmax=20, scale=1):
     """ 
-        plot slice of interpolated displacement field
-        divergence overlain with quiverplot of interpolated displacement components
+        plot quiverplot of slice of interpolated displacement field
+        if compression array provided: overlain with color-coded compression
         igridspace: spacing in µm of interpolation grid
-        for instance: do interpolation here, todo: not efficient change in future to do only once!
     """
     
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(dpi=150)
     
     igridspacing = grid[0,1,0,0]-grid[0,0,0,0] # assume equidistant spacing in xyz
     print(igridspacing)
@@ -534,7 +663,8 @@ def plot_xslice_int(intfield, grid, compression, xpos = 400, outputfolder=None, 
     
     
     if outputfolder is not None:
-        fname = "xy_z" + str(zpos) + "_f" + str(frame) + ".png"
+        pathlib.Path(outputfolder).mkdir(parents=True, exist_ok=True)
+        fname = "yz_x" + str(xpos) + "_f" + str(frame) + "-int.png"
         fig.savefig(outputfolder + "/" + fname)        
         plt.cla()
         plt.close(fig)
@@ -542,10 +672,11 @@ def plot_xslice_int(intfield, grid, compression, xpos = 400, outputfolder=None, 
     else:
         return fig, ax
         
-def plot_yslice_int(intfield, grid, compression, planepos = 400, outputfolder=None, vmin=0, vmax=20, scale=1, planeax = 'y'):
+def plot_yslice_int(intfield, frame, grid, compression, planepos = 400, outputfolder=None, vmin=0, vmax=20, scale=1, planeax = 'y'):
     """ 
-        plot slice of interpolated displacement field
-        divergence overlain with quiverplot of interpolated displacement components
+        plot quiverplot of slice of interpolated displacement field
+        if compression array provided: overlain with color-coded compression
+        igridspace: spacing in µm of interpolation grid
     """
     
     fig, ax = plt.subplots()
@@ -594,7 +725,8 @@ def plot_yslice_int(intfield, grid, compression, planepos = 400, outputfolder=No
     
     
     if outputfolder is not None:
-        fname = "xy_z" + str(zpos) + "_f" + str(frame) + ".png"
+        pathlib.Path(outputfolder).mkdir(parents=True, exist_ok=True)
+        fname = "xy_z" + str(zpos) + "_f" + str(frame) + "-int.png"
         fig.savefig(outputfolder + "/" + fname)        
         plt.cla()
         plt.close(fig)
