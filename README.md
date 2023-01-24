@@ -1,4 +1,4 @@
-# Beadops - Package for operating on microscope data of fluorescent beads
+# Beadops - Package for operations on microscope data of fluorescent beads
 
 The package provides helper functions for tracking fluorescent beads in z-stacks, linking beads, and calculating the space-resolved compression.
 Particles are tracked with [trackpy](https://github.com/soft-matter/trackpy) and visualized in 3D with [vedo](https://github.com/marcomusy/vedo).
@@ -17,14 +17,17 @@ In my usecase I wanted to determine the space-resolved compression of a hydrogel
 ### Output
 
 - Extracted particle tracks can be visualized in 3D (interactive version [figs/linked_3D.html](https://htmlpreview.github.io/?https://github.com/ilorevilo/beadops/figs/linked_3D.html)):
-	![linked_3D](figs/linked_3D.jpg)
-- Cutplanes of linked particles:
 	![](figs/linked_3D.jpg)
+- Cutplanes of linked particles:
+	![](figs/yz_x400_f1.png)
 - Cutplanes of interpolated displacements
-	![](figs/xy_z400_f1.pn)
-- Cutplanes of interpolated displacements with overlain compression
-	![]()
+	![](figs/yz_x400_f1-int.png)
+- Cutplanes of interpolated displacements with overlain compression:
+	![](figs/yz_x400_f1-int-comp.png)
+- pressure-dependent mean compression:
+	![](figs/mean_comp.png)
 
 ### To do
 - unify and clean up plotting functions
 - add vedo plotting function for showing links with arrows
+- clean up trajectory filtering functions
