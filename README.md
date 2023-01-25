@@ -6,7 +6,7 @@ See [beadops_walkthrough.ipynb](beadops_walkthrough.ipynb) for example usage.
 
 ### Purpose
 
-In my usecase I wanted to determine the space-resolved compression of a hydrogel within a microfluidic chip. Therefore, fluorescent beads are embedded in the gel and z-stacks are recorded to determinee the bead positions in 3D. Varying pressures are applied to the device, leading to a hydrogel compression. For each pressure the bead positions are determined from z-stacks. The bead positions are linked between bead configurations at varying pressures to determine the displacement field. The displacement field is further interpolated and the space-resolved compression calculated from the Jacobian determinant.
+In my usecase I wanted to determine the space-resolved compression of a hydrogel within a microfluidic chip. Therefore, fluorescent beads are embedded in the gel and z-stacks are recorded to determine the bead positions in 3D. Varying pressures are applied to the device, leading to a hydrogel compression. For each pressure the bead positions are determined from z-stacks. The bead positions are then linked between bead configurations at varying pressures to determine the displacement field. The displacement field is further interpolated and the space-resolved compression calculated from the Jacobian determinant.
 
 
 ### Input
